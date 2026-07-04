@@ -1,0 +1,742 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover">
+<meta name="theme-color" content="#02070c">
+<title>现实液化 · Liquid Reality</title>
+<style>
+  *{box-sizing:border-box}
+  html,body{margin:0;padding:0;width:100%;height:100%;overflow:hidden;background:#02070c;
+    font-family:system-ui,-apple-system,"PingFang SC","Microsoft YaHei",sans-serif;
+    -webkit-user-select:none;user-select:none;-webkit-tap-highlight-color:transparent}
+  #gl{position:fixed;inset:0;width:100%;height:100%;display:block;touch-action:none}
+  #video{display:none}
+
+  #boot{position:fixed;inset:0;z-index:10;display:flex;flex-direction:column;align-items:center;justify-content:center;
+    gap:10px;text-align:center;padding:28px;color:#cfe8ff;
+    background:radial-gradient(130% 130% at 30% 18%, #0a2740 0%, #041220 55%, #02070c 100%);
+    transition:opacity .7s ease}
+  #boot.hide{opacity:0;pointer-events:none}
+  #boot .drop{font-size:62px;line-height:1;filter:drop-shadow(0 6px 24px rgba(80,190,255,.5));animation:bob 2.6s ease-in-out infinite}
+  @keyframes bob{50%{transform:translateY(-10px)}}
+  #boot h1{margin:8px 0 0;font-size:30px;font-weight:700;letter-spacing:10px;text-indent:10px;color:#eaf6ff}
+  #boot .en{margin:0;font-size:12px;letter-spacing:6px;color:#6fa8cc}
+  #boot .desc{margin:14px 0 0;font-size:14px;line-height:1.9;color:#9cc4e0;max-width:480px}
+  #startBtn{margin-top:26px;padding:14px 48px;border:none;border-radius:999px;font-size:17px;font-weight:600;
+    color:#04222e;background:linear-gradient(135deg,#8ae6ff,#3db6ff);cursor:pointer;
+    box-shadow:0 10px 34px rgba(61,182,255,.45);transition:transform .15s}
+  #startBtn:active{transform:scale(.96)}
+  #startBtn:disabled{opacity:.6}
+  #boot .priv{margin-top:16px;font-size:11px;color:#54788f;letter-spacing:1px}
+
+  #toast{position:fixed;top:calc(env(safe-area-inset-top,0px) + 16px);left:50%;transform:translateX(-50%);
+    z-index:9;padding:9px 20px;border-radius:999px;font-size:13px;color:#c6e8ff;white-space:nowrap;
+    background:rgba(6,20,32,.72);backdrop-filter:blur(10px);-webkit-backdrop-filter:blur(10px);
+    border:1px solid rgba(120,200,255,.16);opacity:0;transition:opacity .4s;pointer-events:none}
+  #hint{position:fixed;bottom:calc(env(safe-area-inset-bottom,0px) + 22px);left:50%;transform:translateX(-50%);
+    z-index:9;padding:9px 20px;border-radius:999px;font-size:13px;color:#bfe2ff;white-space:nowrap;
+    background:rgba(6,20,32,.6);backdrop-filter:blur(10px);-webkit-backdrop-filter:blur(10px);
+    border:1px solid rgba(120,200,255,.14);opacity:0;transition:opacity .8s;pointer-events:none}
+  #muteBtn{position:fixed;right:14px;bottom:calc(env(safe-area-inset-bottom,0px) + 14px);z-index:8;
+    width:44px;height:44px;border-radius:50%;border:1px solid rgba(120,200,255,.18);
+    background:rgba(6,20,32,.55);backdrop-filter:blur(8px);-webkit-backdrop-filter:blur(8px);
+    font-size:19px;cursor:pointer;color:#cfe8ff;display:flex;align-items:center;justify-content:center;
+    transition:transform .15s}
+  #muteBtn:active{transform:scale(.9)}
+</style>
+</head>
+<body>
+<video id="video" playsinline muted autoplay></video>
+<canvas id="gl"></canvas>
+
+<div id="boot">
+  <div class="drop">💧</div>
+  <h1>现实液化</h1>
+  <p class="en">LIQUID REALITY</p>
+  <p class="desc">摄像头画面化作一汪静水。<br>伸出手指划过镜头前,现实便泛起涟漪——<br>折射、高光、色散,波纹散尽后一切如初。</p>
+  <button id="startBtn">开启摄像头</button>
+  <p class="priv">纯本地运行 · 画面不会上传</p>
+</div>
+
+<div id="toast"></div>
+<div id="hint">✋ 伸手划过画面 · 手指与鼠标都能搅动这片水</div>
+<button id="muteBtn" title="声音开关">🔊</button>
+
+<script src="https://cdn.jsdelivr.net/npm/@mediapipe/hands@0.4.1675469240/hands.js"></script>
+<script>
+(() => {
+'use strict';
+
+/* ============ 可调参数 ============ */
+const TUNE = {
+  SIM_SCALE: 0.5,      // 物理模拟分辨率 = 渲染分辨率的一半
+  SIM_MAX: 512,        // 模拟场最长边上限(性能)
+  STEPS: 2,            // 每帧物理迭代次数(波传播速度)
+  DAMPING: 0.994,      // 基础衰减
+  NOISE: 0.0012,       // 环境微噪声(微风/表面张力)
+  RADIUS: 0.026,       // 指尖扰动半径(相对屏高)
+  POKE: 0.14,          // 指尖初次出现的注入强度
+  MOVE_GAIN: 4.5,      // 划动速度 → 强度增益
+  MAX_STRENGTH: 0.6,   // 单点强度上限
+  REFRACT: 0.45,       // 折射拉扯强度
+  DISPERSE: 0.18,      // 色散(RGB 通道分离)
+  NORMAL_Z: 0.24,      // 法线 z(越小光效越锐)
+  SPEC_POW: 90,        // 高光锐度
+  SPEC_INT: 0.85,      // 高光强度
+};
+const f = x => Number(x).toFixed(5);
+
+const canvas = document.getElementById('gl');
+const video  = document.getElementById('video');
+const bootEl = document.getElementById('boot');
+const hintEl = document.getElementById('hint');
+
+let toastTimer;
+function toast(msg, ms = 2800){
+  const el = document.getElementById('toast');
+  el.textContent = msg; el.style.opacity = 1;
+  clearTimeout(toastTimer);
+  if (ms > 0) toastTimer = setTimeout(() => el.style.opacity = 0, ms);
+}
+
+/* ============ WebGL1 初始化 ============ */
+const gl = canvas.getContext('webgl', {antialias:false, alpha:false, depth:false, stencil:false, powerPreference:'high-performance'});
+if (!gl){ bootEl.querySelector('.desc').textContent = '此设备不支持 WebGL,无法运行 😢'; throw new Error('no webgl'); }
+
+const hp = gl.getShaderPrecisionFormat(gl.FRAGMENT_SHADER, gl.HIGH_FLOAT);
+const PRECISION = (hp && hp.precision > 0) ? 'highp' : 'mediump';
+
+// 浮点纹理能力检测: float → half-float → 8bit 打包(兜底)
+const extF   = gl.getExtension('OES_texture_float');
+const extHF  = gl.getExtension('OES_texture_half_float');
+const linF   = gl.getExtension('OES_texture_float_linear');
+const linHF  = gl.getExtension('OES_texture_half_float_linear');
+
+function renderable(type){
+  const tex = gl.createTexture();
+  gl.bindTexture(gl.TEXTURE_2D, tex);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.NEAREST);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.NEAREST);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+  gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, 4, 4, 0, gl.RGBA, type, null);
+  const fb = gl.createFramebuffer();
+  gl.bindFramebuffer(gl.FRAMEBUFFER, fb);
+  gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, tex, 0);
+  const ok = gl.checkFramebufferStatus(gl.FRAMEBUFFER) === gl.FRAMEBUFFER_COMPLETE;
+  gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+  gl.deleteFramebuffer(fb); gl.deleteTexture(tex);
+  return ok;
+}
+
+let simType, packed = false, simLinear = true;
+if (extF && renderable(gl.FLOAT)){ simType = gl.FLOAT; simLinear = !!linF; }
+else if (extHF && renderable(extHF.HALF_FLOAT_OES)){ simType = extHF.HALF_FLOAT_OES; simLinear = !!linHF; }
+else { simType = gl.UNSIGNED_BYTE; packed = true; simLinear = true; }
+
+/* ============ Shader ============ */
+const PRE = (packed ? '#define PACKED\n' : '') + 'precision ' + PRECISION + ' float;\n';
+
+const READH = `
+float readH(sampler2D t, vec2 uv){
+#ifdef PACKED
+  return texture2D(t, uv).r * 2.0 - 1.0;
+#else
+  return texture2D(t, uv).r;
+#endif
+}
+`;
+
+const VERT = `
+attribute vec2 aPos;
+varying vec2 vUv;
+void main(){ vUv = aPos * 0.5 + 0.5; gl_Position = vec4(aPos, 0.0, 1.0); }
+`;
+
+// —— 物理模拟: 二维波动方程 + 9-tap 各向同性模板 + Verlet + 非线性衰减 + 环境噪声
+const SIM_FRAG = PRE + `
+varying vec2 vUv;
+uniform sampler2D uCurr;
+uniform sampler2D uPrev;
+uniform vec2  uTexel;
+uniform float uDamping;
+uniform float uSeed;
+uniform float uAspect;
+uniform float uNoise;
+uniform int   uCount;
+uniform vec4  uTouch[10];   // x, y, 强度, 半径
+` + READH + `
+float hash(vec2 p){
+  return fract(sin(dot(p, vec2(127.1, 311.7)) + uSeed) * 43758.5453);
+}
+void main(){
+  vec2 uv = vUv;
+  vec2 tx = vec2(uTexel.x, 0.0);
+  vec2 ty = vec2(0.0, uTexel.y);
+  // 9-tap 各向同性模板: 轴向 4 邻居各 0.2, 对角 4 邻居各 0.05 → 真正的圆形波纹
+  float avg =
+      (readH(uCurr, uv - tx) + readH(uCurr, uv + tx) +
+       readH(uCurr, uv - ty) + readH(uCurr, uv + ty)) * 0.2 +
+      (readH(uCurr, uv - tx - ty) + readH(uCurr, uv + tx - ty) +
+       readH(uCurr, uv - tx + ty) + readH(uCurr, uv + tx + ty)) * 0.05;
+  // Verlet 积分
+  float val = avg * 2.0 - readH(uPrev, uv);
+  // 非线性衰减: 小振幅衰减快(表面张力抹平细纹), 大振幅衰减慢(惯性)
+  float ampFactor = 1.0 - (1.0 - smoothstep(0.0, 0.08, abs(val))) * 0.012;
+  val *= uDamping * ampFactor;
+  // 指尖扰动注入(高斯)
+  for (int i = 0; i < 10; i++){
+    if (i >= uCount) break;
+    vec4 t = uTouch[i];
+    vec2 d = uv - t.xy;
+    d.x *= uAspect;
+    val += t.z * exp(-dot(d, d) / (t.w * t.w));
+  }
+  // 环境微噪声: 模拟微风/表面张力
+  val += (hash(uv * 913.7) - 0.5) * uNoise;
+  val = clamp(val, -1.2, 1.2);
+#ifdef PACKED
+  gl_FragColor = vec4(val * 0.5 + 0.5, 0.0, 0.0, 1.0);
+#else
+  gl_FragColor = vec4(val, 0.0, 0.0, 1.0);
+#endif
+}
+`;
+
+// —— 最终渲染: 折射 + 色散 + 高光 + 菲涅尔 + 波峰增亮
+const DRAW_FRAG = PRE + `
+varying vec2 vUv;
+uniform sampler2D uSim;
+uniform sampler2D uVideo;
+uniform vec2  uTexel;    // 模拟场纹素
+uniform vec2  uCover;    // cover 裁切缩放
+uniform float uMirror;   // 1=镜像(前置摄像头)
+` + READH + `
+vec2 videoUV(vec2 uv){
+  vec2 v = 0.5 + (uv - 0.5) * uCover;
+  v.x = mix(v.x, 1.0 - v.x, uMirror);
+  return clamp(v, vec2(0.002), vec2(0.998));
+}
+void main(){
+  vec2 uv = vUv;
+  float h  = readH(uSim, uv);
+  float hx = readH(uSim, uv + vec2(uTexel.x, 0.0)) - readH(uSim, uv - vec2(uTexel.x, 0.0));
+  float hy = readH(uSim, uv + vec2(0.0, uTexel.y)) - readH(uSim, uv - vec2(0.0, uTexel.y));
+  vec2 grad = vec2(hx, hy);
+  // 折射: 波纹经过处画面被自然拉扯放大
+  vec2 offs = grad * ${f(TUNE.REFRACT)};
+  // 色散: RGB 三通道折射率略有不同
+  vec3 col;
+  col.r = texture2D(uVideo, videoUV(uv + offs * ${f(1 - TUNE.DISPERSE)})).r;
+  col.g = texture2D(uVideo, videoUV(uv + offs)).g;
+  col.b = texture2D(uVideo, videoUV(uv + offs * ${f(1 + TUNE.DISPERSE)})).b;
+  // 光照: 高光 + 菲涅尔反射
+  vec3 n = normalize(vec3(-grad.x, -grad.y, ${f(TUNE.NORMAL_Z)}));
+  vec3 viewD  = vec3(0.0, 0.0, 1.0);
+  vec3 lightD = normalize(vec3(-0.35, 0.55, 0.75));
+  float spec = pow(max(dot(n, normalize(lightD + viewD)), 0.0), ${f(TUNE.SPEC_POW)}) * ${f(TUNE.SPEC_INT)};
+  float fres = pow(1.0 - max(dot(n, viewD), 0.0), 3.0);
+  col += spec + fres * vec3(0.30, 0.42, 0.55) * 0.8;
+  // 波峰微增亮(伪焦散)
+  col *= 1.0 + h * 0.30;
+  // 轻微暗角
+  vec2 q = uv - 0.5;
+  col *= 1.0 - dot(q, q) * 0.30;
+  gl_FragColor = vec4(col, 1.0);
+}
+`;
+
+function compile(type, src){
+  const s = gl.createShader(type);
+  gl.shaderSource(s, src); gl.compileShader(s);
+  if (!gl.getShaderParameter(s, gl.COMPILE_STATUS)){
+    console.error('Shader 编译失败:\n' + gl.getShaderInfoLog(s));
+    toast('着色器编译失败,请换个浏览器试试', 0);
+    throw new Error('shader compile');
+  }
+  return s;
+}
+function makeProgram(vsSrc, fsSrc){
+  const p = gl.createProgram();
+  gl.attachShader(p, compile(gl.VERTEX_SHADER, vsSrc));
+  gl.attachShader(p, compile(gl.FRAGMENT_SHADER, fsSrc));
+  gl.linkProgram(p);
+  if (!gl.getProgramParameter(p, gl.LINK_STATUS)){
+    console.error('Program 链接失败:\n' + gl.getProgramInfoLog(p));
+    throw new Error('link');
+  }
+  const u = {}, n = gl.getProgramParameter(p, gl.ACTIVE_UNIFORMS);
+  for (let i = 0; i < n; i++){
+    const info = gl.getActiveUniform(p, i);
+    u[info.name.replace('[0]','')] = gl.getUniformLocation(p, info.name);
+  }
+  return { p, u, aPos: gl.getAttribLocation(p, 'aPos') };
+}
+
+const simProg  = makeProgram(VERT, SIM_FRAG);
+const drawProg = makeProgram(VERT, DRAW_FRAG);
+
+// 全屏大三角
+const quad = gl.createBuffer();
+gl.bindBuffer(gl.ARRAY_BUFFER, quad);
+gl.bufferData(gl.ARRAY_BUFFER, new Float32Array([-1,-1, 3,-1, -1,3]), gl.STATIC_DRAW);
+gl.disable(gl.DEPTH_TEST); gl.disable(gl.BLEND);
+
+function drawQuad(prog){
+  gl.bindBuffer(gl.ARRAY_BUFFER, quad);
+  gl.enableVertexAttribArray(prog.aPos);
+  gl.vertexAttribPointer(prog.aPos, 2, gl.FLOAT, false, 0, 0);
+  gl.drawArrays(gl.TRIANGLES, 0, 3);
+}
+
+/* ============ FBO ping-pong (3 个循环) ============ */
+let sims = [], simW = 0, simH = 0;
+function makeTarget(w, h){
+  const tex = gl.createTexture();
+  gl.bindTexture(gl.TEXTURE_2D, tex);
+  const filt = simLinear ? gl.LINEAR : gl.NEAREST;
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, filt);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, filt);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+  gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, w, h, 0, gl.RGBA, simType, null);
+  const fbo = gl.createFramebuffer();
+  gl.bindFramebuffer(gl.FRAMEBUFFER, fbo);
+  gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, tex, 0);
+  gl.clearColor(packed ? 0.5 : 0, 0, 0, 1);
+  gl.clear(gl.COLOR_BUFFER_BIT);
+  gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+  return { tex, fbo };
+}
+function initSim(){
+  sims.forEach(t => { gl.deleteTexture(t.tex); gl.deleteFramebuffer(t.fbo); });
+  sims = [makeTarget(simW, simH), makeTarget(simW, simH), makeTarget(simW, simH)];
+}
+function resize(){
+  const dpr = Math.min(window.devicePixelRatio || 1, 2);
+  const w = Math.max(1, Math.round(innerWidth * dpr));
+  const h = Math.max(1, Math.round(innerHeight * dpr));
+  if (canvas.width === w && canvas.height === h && sims.length) return;
+  canvas.width = w; canvas.height = h;
+  const s = Math.min(TUNE.SIM_SCALE, TUNE.SIM_MAX / Math.max(w, h));
+  simW = Math.max(48, Math.round(w * s));
+  simH = Math.max(48, Math.round(h * s));
+  initSim();
+}
+addEventListener('resize', resize);
+resize();
+
+/* ============ 视频纹理 ============ */
+const videoTex = gl.createTexture();
+gl.bindTexture(gl.TEXTURE_2D, videoTex);
+gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
+gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, 1, 1, 0, gl.RGBA, gl.UNSIGNED_BYTE, new Uint8Array([4, 10, 16, 255]));
+
+let videoW = 0, videoH = 0, useCamera = false, fallbackDrawn = false;
+function uploadVideo(){
+  if (useCamera && video.readyState >= 2 && video.videoWidth){
+    gl.bindTexture(gl.TEXTURE_2D, videoTex);
+    gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, true);
+    gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, video);
+    gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, false);
+    videoW = video.videoWidth; videoH = video.videoHeight;
+  }
+}
+// 摄像头不可用时的演示背景
+function useFallbackBackdrop(){
+  if (fallbackDrawn) return;
+  fallbackDrawn = true;
+  const c = document.createElement('canvas'); c.width = c.height = 1024;
+  const x = c.getContext('2d');
+  const g = x.createLinearGradient(0, 0, 0, 1024);
+  g.addColorStop(0, '#14324f'); g.addColorStop(0.55, '#0b1e33'); g.addColorStop(1, '#060d18');
+  x.fillStyle = g; x.fillRect(0, 0, 1024, 1024);
+  const cols = ['rgba(90,190,255,', 'rgba(120,230,210,', 'rgba(150,130,255,', 'rgba(255,190,120,'];
+  for (let i = 0; i < 10; i++){
+    const cx = Math.random() * 1024, cy = Math.random() * 1024, r = 120 + Math.random() * 260;
+    const rg = x.createRadialGradient(cx, cy, 0, cx, cy, r);
+    const cc = cols[i % cols.length];
+    rg.addColorStop(0, cc + '0.16)'); rg.addColorStop(1, cc + '0)');
+    x.fillStyle = rg; x.beginPath(); x.arc(cx, cy, r, 0, 7); x.fill();
+  }
+  x.fillStyle = 'rgba(220,240,255,0.5)';
+  for (let i = 0; i < 90; i++){
+    x.globalAlpha = 0.15 + Math.random() * 0.5;
+    x.fillRect(Math.random() * 1024, Math.random() * 1024, 1.6, 1.6);
+  }
+  x.globalAlpha = 1;
+  gl.bindTexture(gl.TEXTURE_2D, videoTex);
+  gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, true);
+  gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, c);
+  gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, false);
+  videoW = videoH = 1024;
+}
+function coverScale(){
+  if (!videoW) return [1, 1];
+  const ca = canvas.width / canvas.height, va = videoW / videoH;
+  return va > ca ? [ca / va, 1] : [1, va / ca];
+}
+
+/* ============ 程序化水声 ============ */
+const AudioSys = (() => {
+  let ctx = null, master, revIn, stirGain, stirFilter, ambGain, noiseBuf;
+  let enabled = true, started = false, lastPlipT = 0, energySmooth = 0;
+
+  // 粉噪声缓冲(环境/划水/溅沫共用)
+  function makeNoise(sec){
+    const len = Math.floor(ctx.sampleRate * sec);
+    const buf = ctx.createBuffer(2, len, ctx.sampleRate);
+    for (let ch = 0; ch < 2; ch++){
+      const d = buf.getChannelData(ch);
+      let b0 = 0, b1 = 0, b2 = 0;
+      for (let i = 0; i < len; i++){
+        const w = Math.random() * 2 - 1;
+        b0 = 0.997 * b0 + 0.029 * w;
+        b1 = 0.985 * b1 + 0.032 * w;
+        b2 = 0.950 * b2 + 0.048 * w;
+        d[i] = (b0 + b1 + b2 + w * 0.05) * 0.9;
+      }
+    }
+    return buf;
+  }
+  // 程序化混响脉冲响应(指数衰减噪声)
+  function makeIR(sec, decay){
+    const len = Math.floor(ctx.sampleRate * sec);
+    const buf = ctx.createBuffer(2, len, ctx.sampleRate);
+    for (let ch = 0; ch < 2; ch++){
+      const d = buf.getChannelData(ch);
+      for (let i = 0; i < len; i++)
+        d[i] = (Math.random() * 2 - 1) * Math.pow(1 - i / len, decay);
+    }
+    return buf;
+  }
+  function panNode(x){
+    if (!ctx.createStereoPanner) return null;
+    const p = ctx.createStereoPanner();
+    p.pan.value = Math.max(-0.85, Math.min(0.85, x * 2 - 1));
+    return p;
+  }
+
+  function start(){
+    if (started) return;
+    const AC = window.AudioContext || window.webkitAudioContext;
+    if (!AC) return;
+    try { ctx = new AC(); } catch (e){ return; }
+    started = true;
+    if (ctx.state === 'suspended') ctx.resume();
+
+    master = ctx.createGain();
+    master.gain.value = 0.9;
+    const comp = ctx.createDynamicsCompressor();
+    comp.threshold.value = -20; comp.knee.value = 18; comp.ratio.value = 7;
+    master.connect(comp); comp.connect(ctx.destination);
+
+    revIn = ctx.createConvolver();
+    revIn.buffer = makeIR(1.7, 3.2);
+    const wet = ctx.createGain(); wet.gain.value = 0.4;
+    revIn.connect(wet); wet.connect(master);
+
+    noiseBuf = makeNoise(4);
+
+    // —— 水面环境氛围: 双声部低通噪声 + 慢 LFO 起伏
+    ambGain = ctx.createGain(); ambGain.gain.value = 0;
+    ambGain.connect(master);
+    for (let k = 0; k < 2; k++){
+      const src = ctx.createBufferSource();
+      src.buffer = noiseBuf; src.loop = true;
+      src.playbackRate.value = k ? 0.78 : 1.0;
+      const lp = ctx.createBiquadFilter();
+      lp.type = 'lowpass'; lp.frequency.value = 340 + k * 160; lp.Q.value = 0.6;
+      const g = ctx.createGain(); g.gain.value = 0.5;
+      const lfo = ctx.createOscillator();
+      lfo.frequency.value = 0.05 + k * 0.048;
+      const lfoG = ctx.createGain(); lfoG.gain.value = 0.3;
+      lfo.connect(lfoG); lfoG.connect(g.gain); lfo.start();
+      const p = panNode(k ? 0.15 : 0.85);
+      src.connect(lp); lp.connect(g);
+      if (p){ g.connect(p); p.connect(ambGain); } else g.connect(ambGain);
+      src.start();
+    }
+    ambGain.gain.setTargetAtTime(0.055, ctx.currentTime + 0.3, 1.2);
+
+    // —— 划水声: 带通噪声, 由波纹能量驱动
+    const stirSrc = ctx.createBufferSource();
+    stirSrc.buffer = noiseBuf; stirSrc.loop = true; stirSrc.playbackRate.value = 1.3;
+    stirFilter = ctx.createBiquadFilter();
+    stirFilter.type = 'bandpass'; stirFilter.frequency.value = 900; stirFilter.Q.value = 0.9;
+    stirGain = ctx.createGain(); stirGain.gain.value = 0;
+    stirSrc.connect(stirFilter); stirFilter.connect(stirGain);
+    stirGain.connect(master);
+    const stirRev = ctx.createGain(); stirRev.gain.value = 0.5;
+    stirGain.connect(stirRev); stirRev.connect(revIn);
+    stirSrc.start();
+
+    // —— 闲时远处滴水
+    setInterval(() => {
+      if (enabled && ctx.state === 'running' && energySmooth < 0.02 && Math.random() < 0.55)
+        plip(Math.random(), 0.06 + Math.random() * 0.08, true);
+    }, 3800);
+  }
+
+  // 每帧: 波纹总能量 → 划水声强度/亮度 + 氛围微涨
+  function stir(energy){
+    if (!started) return;
+    energySmooth += (energy - energySmooth) * 0.12;
+    const t = ctx.currentTime;
+    const e = Math.min(energySmooth, 1.2);
+    stirGain.gain.setTargetAtTime(Math.min(e * 0.35, 0.26), t, 0.07);
+    stirFilter.frequency.setTargetAtTime(550 + Math.min(e * 2600, 2100), t, 0.12);
+    ambGain.gain.setTargetAtTime(0.055 + Math.min(e * 0.09, 0.06), t, 0.6);
+  }
+
+  // 水滴 "咚滴": 上滑正弦 + 低频身体 + 溅沫噪声, 按 x 声像
+  function plip(x, strength, far){
+    if (!started || !enabled || ctx.state !== 'running') return;
+    const t = ctx.currentTime;
+    if (t - lastPlipT < 0.05) return;
+    lastPlipT = t;
+    const s = Math.min(strength / TUNE.MAX_STRENGTH, 1);
+    const voice = ctx.createGain(); voice.gain.value = 1;
+    const amp = far ? 0.05 : 0.09 + s * 0.3;
+
+    const o = ctx.createOscillator(); o.type = 'sine';
+    const f0 = (far ? 500 : 300) + Math.random() * 260 + s * 200;
+    o.frequency.setValueAtTime(f0, t);
+    o.frequency.exponentialRampToValueAtTime(f0 * (1.7 + s * 1.3 + Math.random() * 0.5), t + 0.09 + Math.random() * 0.07);
+    const g = ctx.createGain();
+    g.gain.setValueAtTime(0, t);
+    g.gain.linearRampToValueAtTime(amp, t + 0.007);
+    g.gain.exponentialRampToValueAtTime(0.0006, t + 0.15 + s * 0.2);
+    o.connect(g); g.connect(voice);
+    o.start(t); o.stop(t + 0.45);
+
+    if (!far){
+      const o2 = ctx.createOscillator(); o2.type = 'sine';
+      o2.frequency.setValueAtTime(130 + s * 70, t);
+      o2.frequency.exponentialRampToValueAtTime(58, t + 0.12);
+      const g2 = ctx.createGain();
+      g2.gain.setValueAtTime(0, t);
+      g2.gain.linearRampToValueAtTime(amp * 0.7, t + 0.01);
+      g2.gain.exponentialRampToValueAtTime(0.0006, t + 0.16);
+      o2.connect(g2); g2.connect(voice);
+      o2.start(t); o2.stop(t + 0.3);
+    }
+    if (s > 0.35 && !far){
+      const n = ctx.createBufferSource(); n.buffer = noiseBuf;
+      n.playbackRate.value = 1.5 + Math.random();
+      const hp = ctx.createBiquadFilter(); hp.type = 'highpass'; hp.frequency.value = 1600;
+      const g3 = ctx.createGain();
+      g3.gain.setValueAtTime(0, t);
+      g3.gain.linearRampToValueAtTime(amp * 0.45, t + 0.012);
+      g3.gain.exponentialRampToValueAtTime(0.0006, t + 0.09 + s * 0.1);
+      n.connect(hp); hp.connect(g3); g3.connect(voice);
+      n.start(t, Math.random() * 2); n.stop(t + 0.25);
+    }
+
+    const p = panNode(x);
+    const out = p || voice;
+    if (p) voice.connect(p);
+    out.connect(master);
+    const rs = ctx.createGain(); rs.gain.value = far ? 0.9 : 0.45;
+    out.connect(rs); rs.connect(revIn);
+  }
+
+  function setEnabled(v){
+    enabled = v;
+    if (started) master.gain.setTargetAtTime(v ? 0.9 : 0, ctx.currentTime, 0.05);
+  }
+  function resume(){ if (started && ctx.state === 'suspended') ctx.resume(); }
+  return { start, plip, stir, setEnabled, resume, get enabled(){ return enabled; } };
+})();
+
+const muteBtn = document.getElementById('muteBtn');
+muteBtn.addEventListener('click', e => {
+  e.stopPropagation();
+  const v = !AudioSys.enabled;
+  AudioSys.setEnabled(v);
+  muteBtn.textContent = v ? '🔊' : '🔇';
+});
+
+/* ============ 交互点(10 指尖 + 触摸/鼠标) ============ */
+const points = new Map();   // id -> {x, y, strength, t}
+function setPoint(id, x, y, t){
+  if (!isFinite(x) || !isFinite(y)) return;
+  const p = points.get(id);
+  if (!p){
+    points.set(id, { x, y, strength: TUNE.POKE, t, lastPlip: t });
+    AudioSys.plip(x, TUNE.POKE * 2.2);
+  } else {
+    const sp = Math.hypot(x - p.x, y - p.y);
+    p.strength = Math.min(p.strength * 0.55 + sp * TUNE.MOVE_GAIN, TUNE.MAX_STRENGTH);
+    p.x = x; p.y = y; p.t = t;
+    if (p.strength > 0.16 && t - p.lastPlip > 140 + Math.random() * 160){
+      p.lastPlip = t;
+      AudioSys.plip(x, p.strength);
+    }
+  }
+}
+const touchData = new Float32Array(40);
+let waveEnergy = 0;
+function buildTouches(){
+  const now = performance.now();
+  let count = 0, energy = 0;
+  points.forEach((p, id) => {
+    if (now - p.t > 450){ points.delete(id); return; }
+    if (count >= 10 || p.strength < 0.003) return;
+    const o = count * 4;
+    touchData[o] = p.x; touchData[o + 1] = p.y;
+    touchData[o + 2] = p.strength; touchData[o + 3] = TUNE.RADIUS;
+    energy += p.strength;
+    p.strength *= 0.8;   // 更新间隔内平滑衰减
+    count++;
+  });
+  waveEnergy = energy;
+  return count;
+}
+
+// 触摸 / 鼠标兜底交互
+function pointerUV(e){ return [e.clientX / (innerWidth || 1), 1 - e.clientY / (innerHeight || 1)]; }
+function pid(e){ return e.pointerType === 'mouse' ? 'm' : 'p' + e.pointerId; }
+canvas.addEventListener('pointerdown', e => {
+  AudioSys.resume();
+  const [x, y] = pointerUV(e); setPoint(pid(e), x, y, performance.now());
+});
+canvas.addEventListener('pointermove', e => {
+  const [x, y] = pointerUV(e); setPoint(pid(e), x, y, performance.now());
+});
+['pointerup', 'pointercancel', 'pointerleave'].forEach(ev =>
+  canvas.addEventListener(ev, e => points.delete(pid(e))));
+document.addEventListener('gesturestart', e => e.preventDefault());
+
+/* ============ MediaPipe Hands: 10 个指尖 ============ */
+const TIPS = [4, 8, 12, 16, 20];
+let handsSolver = null, handsBusy = false, handsOK = false, modelReady = false, gotHand = false, lastSend = 0;
+
+function initHands(){
+  if (typeof Hands === 'undefined'){
+    toast('手势模型加载失败 · 仍可用手指/鼠标划动', 5000);
+    return;
+  }
+  try {
+    handsSolver = new Hands({ locateFile: f => 'https://cdn.jsdelivr.net/npm/@mediapipe/hands@0.4.1675469240/' + f });
+    handsSolver.setOptions({ maxNumHands: 2, modelComplexity: 0, minDetectionConfidence: 0.5, minTrackingConfidence: 0.5 });
+    handsSolver.onResults(onHands);
+    handsOK = true;
+    toast('手势模型加载中…', 0);
+  } catch (e){
+    console.error(e);
+    toast('手势模型初始化失败 · 仍可用手指/鼠标划动', 5000);
+  }
+}
+function onHands(res){
+  if (!modelReady){ modelReady = true; toast('✋ 模型就绪,伸手试试', 3000); }
+  const now = performance.now();
+  const [sx, sy] = coverScale();
+  const lmss = res.multiHandLandmarks || [];
+  if (lmss.length && !gotHand){ gotHand = true; }
+  for (let hi = 0; hi < lmss.length; hi++){
+    const lms = lmss[hi];
+    for (let k = 0; k < TIPS.length; k++){
+      const lm = lms[TIPS[k]];
+      // 镜像 + cover 裁切 → 屏幕 uv
+      const x = 0.5 + (0.5 - lm.x) / sx;
+      const y = 0.5 + (0.5 - lm.y) / sy;
+      if (x < -0.05 || x > 1.05 || y < -0.05 || y > 1.05) continue;
+      setPoint('h' + hi + '_' + TIPS[k], x, y, now);
+    }
+  }
+}
+function pumpHands(now){
+  if (!handsOK || handsBusy || !useCamera || video.readyState < 2 || now - lastSend < 33) return;
+  handsBusy = true; lastSend = now;
+  handsSolver.send({ image: video }).catch(() => {}).then(() => { handsBusy = false; });
+}
+
+/* ============ 主循环 ============ */
+let seedGen = 1;
+function frame(now){
+  resize();
+  uploadVideo();
+  pumpHands(now);
+
+  const count = buildTouches();
+  AudioSys.stir(waveEnergy);
+
+  // —— 物理迭代 (半分辨率, FBO ping-pong ×3)
+  gl.useProgram(simProg.p);
+  gl.viewport(0, 0, simW, simH);
+  gl.uniform2f(simProg.u.uTexel, 1 / simW, 1 / simH);
+  gl.uniform1f(simProg.u.uDamping, TUNE.DAMPING);
+  gl.uniform1f(simProg.u.uAspect, canvas.width / canvas.height);
+  gl.uniform1f(simProg.u.uNoise, TUNE.NOISE);
+  gl.uniform4fv(simProg.u.uTouch, touchData);
+  for (let s = 0; s < TUNE.STEPS; s++){
+    const prev = sims[0], curr = sims[1], next = sims[2];
+    gl.bindFramebuffer(gl.FRAMEBUFFER, next.fbo);
+    gl.activeTexture(gl.TEXTURE0); gl.bindTexture(gl.TEXTURE_2D, curr.tex);
+    gl.activeTexture(gl.TEXTURE1); gl.bindTexture(gl.TEXTURE_2D, prev.tex);
+    gl.uniform1i(simProg.u.uCurr, 0);
+    gl.uniform1i(simProg.u.uPrev, 1);
+    gl.uniform1f(simProg.u.uSeed, (seedGen = (seedGen * 16807) % 2147483647) % 100);
+    gl.uniform1i(simProg.u.uCount, s === 0 ? count : 0);   // 扰动只在首步注入
+    drawQuad(simProg);
+    sims = [curr, next, prev];
+  }
+
+  // —— 最终渲染 (全分辨率)
+  gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+  gl.viewport(0, 0, canvas.width, canvas.height);
+  gl.useProgram(drawProg.p);
+  gl.activeTexture(gl.TEXTURE0); gl.bindTexture(gl.TEXTURE_2D, sims[1].tex);
+  gl.activeTexture(gl.TEXTURE1); gl.bindTexture(gl.TEXTURE_2D, videoTex);
+  gl.uniform1i(drawProg.u.uSim, 0);
+  gl.uniform1i(drawProg.u.uVideo, 1);
+  gl.uniform2f(drawProg.u.uTexel, 1 / simW, 1 / simH);
+  const cov = coverScale();
+  gl.uniform2f(drawProg.u.uCover, cov[0], cov[1]);
+  gl.uniform1f(drawProg.u.uMirror, useCamera ? 1 : 0);
+  drawQuad(drawProg);
+}
+function loop(now){
+  requestAnimationFrame(loop);
+  frame(now);
+}
+requestAnimationFrame(loop);
+window.__lqTick = frame;   // 测试钩子: 手动驱动一帧(不自调度)
+
+/* ============ 启动 ============ */
+document.getElementById('startBtn').addEventListener('click', async () => {
+  const btn = document.getElementById('startBtn');
+  btn.disabled = true; btn.textContent = '启动中…';
+  AudioSys.start();   // 必须在用户手势内创建 AudioContext (iOS)
+  let ok = false;
+  try {
+    if (!navigator.mediaDevices) throw new Error('need https');
+    const stream = await navigator.mediaDevices.getUserMedia({
+      video: { facingMode: 'user', width: { ideal: 1280 }, height: { ideal: 720 } },
+      audio: false
+    });
+    video.srcObject = stream;
+    await video.play();
+    useCamera = true; ok = true;
+  } catch (e){
+    console.warn('camera:', e);
+    useFallbackBackdrop();
+    toast('未获得摄像头 · 已切换演示背景,手指/鼠标划动同样有效', 5000);
+  }
+  bootEl.classList.add('hide');
+  setTimeout(() => bootEl.remove(), 800);
+  hintEl.style.opacity = 1;
+  setTimeout(() => hintEl.style.opacity = 0, 7000);
+  if (ok) initHands();
+  try { await navigator.wakeLock.request('screen'); } catch (e){}
+});
+
+})();
+</script>
+</body>
+</html>
